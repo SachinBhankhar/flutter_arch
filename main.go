@@ -25,13 +25,13 @@ var baseStructure = []string{
 }
 
 func camelCase(s string) string {
-    parts := strings.Split(s, "_")
-    for i := 1; i < len(parts); i++ {
-        if len(parts[i]) > 0 {
-            parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
-        }
-    }
-    return strings.ToLower(parts[0]) + strings.Join(parts[1:], "")
+	parts := strings.Split(s, "_")
+	for i := 1; i < len(parts); i++ {
+		if len(parts[i]) > 0 {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
+	}
+	return strings.ToLower(parts[0]) + strings.Join(parts[1:], "")
 }
 
 // pascalCase turns "my_page" or "my-page" into "MyPage"
@@ -65,23 +65,20 @@ func appendRoute(feature, pageName string) {
 	// ensure folder exists
 	_ = os.MkdirAll(filepath.Dir(routerFile), os.ModePerm)
 
+	// import page
 	importLine := fmt.Sprintf("import '../features/%s/presentation/pages/%s_page.dart';\n", feature, pageName)
+	// import page_names.dart constants
+	constImport := "import 'page_names.dart';\n"
 
-	// route path logic:
-	var routePath string
-	if pageName == feature {
-		routePath = fmt.Sprintf("/%s", pageName)
-	} else {
-		routePath = fmt.Sprintf("/%s/%s", feature, pageName)
-	}
+	// route constant
+	constName := "k" + pascalCase(pageName) + "Page"
 
-	routeLine := fmt.Sprintf("    GoRoute(path: '%s', builder: (context, state) => %sPage()),\n", routePath, pascalCase(pageName))
+	routeLine := fmt.Sprintf("    GoRoute(path: %s, builder: (context, state) => %sPage()),\n", constName, pascalCase(pageName))
 
 	// create base router if doesn't exist
 	if _, err := os.Stat(routerFile); os.IsNotExist(err) {
 		base := `import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-
 // AUTO_IMPORTS
 
 final GoRouter router = GoRouter(
@@ -105,28 +102,22 @@ final GoRouter router = GoRouter(
 	}
 	content := string(data)
 
-	// add import if not present
+	// add import for page_names.dart if not present
+	if !strings.Contains(content, constImport) {
+		if strings.Contains(content, "// AUTO_IMPORTS") {
+			content = strings.Replace(content, "// AUTO_IMPORTS", constImport+"// AUTO_IMPORTS", 1)
+		} else {
+			content = constImport + content
+		}
+		fmt.Println("➡️  Added import for page_names.dart")
+	}
+
+	// add import for page if not present
 	if !strings.Contains(content, importLine) {
 		if strings.Contains(content, "// AUTO_IMPORTS") {
 			content = strings.Replace(content, "// AUTO_IMPORTS", importLine+"// AUTO_IMPORTS", 1)
 		} else {
-			// attempt to insert after last import
-			lastImport := strings.LastIndex(content, "import ")
-			if lastImport != -1 {
-				// find end of the import line
-				after := content[lastImport:]
-				endLine := strings.Index(after, ";\n")
-				if endLine != -1 {
-					insertPos := lastImport + endLine + 2
-					content = content[:insertPos] + importLine + content[insertPos:]
-				} else {
-					// fallback: prepend
-					content = importLine + content
-				}
-			} else {
-				// no import found, prepend
-				content = importLine + "\n" + content
-			}
+			content = importLine + content
 		}
 		fmt.Printf("➡️  Added import for %s_page.dart\n", pageName)
 	}
@@ -138,17 +129,15 @@ final GoRouter router = GoRouter(
 		} else if strings.Contains(content, "routes: [") {
 			content = strings.Replace(content, "routes: [", "routes: [\n"+routeLine, 1)
 		} else {
-			// fallback: try to append routes block before final closing );
 			idx := strings.LastIndex(content, ");")
 			if idx != -1 {
 				block := "\nfinal GoRouter router = GoRouter(\n  routes: [\n" + routeLine + "  ],\n);\n"
 				content = content[:idx] + block + content[idx:]
 			} else {
-				// as last resort, append a router block
 				content = content + "\nfinal GoRouter router = GoRouter(\n  routes: [\n" + routeLine + "  ],\n);\n"
 			}
 		}
-		fmt.Printf("➡️  Added GoRoute for %sPage (path: %s)\n", pascalCase(pageName), routePath)
+		fmt.Printf("➡️  Added GoRoute for %sPage (path: %s)\n", pascalCase(pageName), constName)
 	}
 
 	// write back
@@ -292,7 +281,7 @@ class %sNotifier extends AsyncNotifier<bool> {
 final %sProvider = AsyncNotifierProvider<%sNotifier, bool>(() => %sNotifier());
 `,
 		pascalCase(providerName), // %s -> class name
-		camelCase(providerName), // %s -> provider variable name
+		camelCase(providerName),  // %s -> provider variable name
 		pascalCase(providerName), // %s -> generic type for AsyncNotifierProvider
 		pascalCase(providerName), // %s -> instance creation
 	)
@@ -377,7 +366,7 @@ func addPageConstant(pageName string) {
 	_ = os.MkdirAll(filepath.Dir(constFile), os.ModePerm)
 
 	constName := "k" + pascalCase(pageName) + "Page"
-	constLine := fmt.Sprintf("const %s = '%s';\n", constName, pageName)
+	constLine := fmt.Sprintf("const %s = '/%s';\n", constName, pageName)
 
 	// Create file with header if missing
 	if _, err := os.Stat(constFile); os.IsNotExist(err) {
