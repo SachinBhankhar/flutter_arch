@@ -24,6 +24,16 @@ var baseStructure = []string{
 	"test/features/%s",
 }
 
+func camelCase(s string) string {
+    parts := strings.Split(s, "_")
+    for i := 1; i < len(parts); i++ {
+        if len(parts[i]) > 0 {
+            parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+        }
+    }
+    return strings.ToLower(parts[0]) + strings.Join(parts[1:], "")
+}
+
 // pascalCase turns "my_page" or "my-page" into "MyPage"
 func pascalCase(s string) string {
 	if s == "" {
@@ -150,16 +160,16 @@ final GoRouter router = GoRouter(
 
 // createFeature scaffolds the whole feature folders and some default files
 func createFeature(feature string) {
-    for _, pattern := range baseStructure {
-        var dirPath string
-        if strings.Contains(pattern, "%s") {
-            dirPath = fmt.Sprintf(pattern, feature)
-        } else {
-            dirPath = pattern
-        }
-        _ = os.MkdirAll(dirPath, os.ModePerm)
-        fmt.Printf("✅ Created %s\n", dirPath)
-    }
+	for _, pattern := range baseStructure {
+		var dirPath string
+		if strings.Contains(pattern, "%s") {
+			dirPath = fmt.Sprintf(pattern, feature)
+		} else {
+			dirPath = pattern
+		}
+		_ = os.MkdirAll(dirPath, os.ModePerm)
+		fmt.Printf("✅ Created %s\n", dirPath)
+	}
 	// default scaffolds
 	createEntity(feature, feature)
 	createUsecase(feature, "example")
@@ -260,38 +270,32 @@ func createProvider(feature, providerName string) {
 	// provider variable uses lower-case providerName + "Provider"
 	content := fmt.Sprintf(`import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-// State
-class %sState {
-  final bool isLoading;
-  final String? error;
-
-  %sState({this.isLoading = false, this.error});
-
-  %sState copyWith({bool? isLoading, String? error}) {
-    return %sState(
-      isLoading: isLoading ?? this.isLoading,
-      error: error ?? this.error,
-    );
+class %sNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    // Initial async check
+    await Future.delayed(const Duration(seconds: 2));
+    return DateTime.now().second == 1;
   }
-}
 
-// Notifier
-class %sNotifier extends StateNotifier<%sState> {
-  %sNotifier() : super(%sState());
-
-  void exampleAction() async {
-    state = state.copyWith(isLoading: true);
-    await Future.delayed(Duration(seconds: 1));
-    state = state.copyWith(isLoading: false);
+  /// Re-run the async logic (refresh)
+  Future<void> reload() async {
+    state = const AsyncValue.loading();
+    state = await AsyncValue.guard(() async {
+      await Future.delayed(const Duration(seconds: 2));
+      return DateTime.now().second == 1;
+    });
   }
 }
 
 // Provider
-final %sProvider =
-    StateNotifierProvider<%sNotifier, %sState>((ref) => %sNotifier());
-`, pascalCase(providerName), pascalCase(providerName), pascalCase(providerName), pascalCase(providerName),
-		pascalCase(providerName), pascalCase(providerName), pascalCase(providerName), pascalCase(providerName),
-		providerName, pascalCase(providerName), pascalCase(providerName), pascalCase(providerName))
+final %sProvider = AsyncNotifierProvider<%sNotifier, bool>(() => %sNotifier());
+`,
+		pascalCase(providerName), // %s -> class name
+		camelCase(providerName), // %s -> provider variable name
+		pascalCase(providerName), // %s -> generic type for AsyncNotifierProvider
+		pascalCase(providerName), // %s -> instance creation
+	)
 
 	writeFile(file, content)
 	writeTest(feature, providerName+"_provider_test.dart", "// TODO: write provider tests\n")
@@ -337,7 +341,7 @@ class %sPage extends ConsumerWidget {
 	writeFile(file, content)
 	writeTest(feature, pageName+"_page_test.dart", "// TODO: write page widget tests\n")
 
-    addPageConstant(pageName)
+	addPageConstant(pageName)
 	// Add route to router.dart
 	appendRoute(feature, pageName)
 }
@@ -369,37 +373,37 @@ func writeTest(feature, filename, content string) {
 }
 
 func addPageConstant(pageName string) {
-    constFile := filepath.Join("lib", "core", "page_names.dart")
-    _ = os.MkdirAll(filepath.Dir(constFile), os.ModePerm)
+	constFile := filepath.Join("lib", "core", "page_names.dart")
+	_ = os.MkdirAll(filepath.Dir(constFile), os.ModePerm)
 
-    constName := "k" + pascalCase(pageName) + "Page"
-    constLine := fmt.Sprintf("const %s = '%s';\n", constName, pageName)
+	constName := "k" + pascalCase(pageName) + "Page"
+	constLine := fmt.Sprintf("const %s = '%s';\n", constName, pageName)
 
-    // Create file with header if missing
-    if _, err := os.Stat(constFile); os.IsNotExist(err) {
-        header := "// AUTO_GENERATED – do not edit manually.\n\n"
-        if err := os.WriteFile(constFile, []byte(header), 0644); err != nil {
-            fmt.Printf("❌ Failed to create %s: %v\n", constFile, err)
-            return
-        }
-    }
+	// Create file with header if missing
+	if _, err := os.Stat(constFile); os.IsNotExist(err) {
+		header := "// AUTO_GENERATED – do not edit manually.\n\n"
+		if err := os.WriteFile(constFile, []byte(header), 0644); err != nil {
+			fmt.Printf("❌ Failed to create %s: %v\n", constFile, err)
+			return
+		}
+	}
 
-    // Read existing
-    data, err := os.ReadFile(constFile)
-    if err != nil {
-        fmt.Printf("❌ Failed to read %s: %v\n", constFile, err)
-        return
-    }
-    content := string(data)
+	// Read existing
+	data, err := os.ReadFile(constFile)
+	if err != nil {
+		fmt.Printf("❌ Failed to read %s: %v\n", constFile, err)
+		return
+	}
+	content := string(data)
 
-    // Only add if it doesn’t already exist
-    if !strings.Contains(content, constName) {
-        if err := os.WriteFile(constFile, append(data, []byte(constLine)...), 0644); err != nil {
-            fmt.Printf("❌ Failed to update %s: %v\n", constFile, err)
-            return
-        }
-        fmt.Printf("🔗 Added constant %s to page_names.dart\n", constName)
-    }
+	// Only add if it doesn’t already exist
+	if !strings.Contains(content, constName) {
+		if err := os.WriteFile(constFile, append(data, []byte(constLine)...), 0644); err != nil {
+			fmt.Printf("❌ Failed to update %s: %v\n", constFile, err)
+			return
+		}
+		fmt.Printf("🔗 Added constant %s to page_names.dart\n", constName)
+	}
 }
 
 func main() {
@@ -482,4 +486,3 @@ func main() {
 		fmt.Println("❌ Unknown command. Use: new")
 	}
 }
-
