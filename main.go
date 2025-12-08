@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -35,8 +36,86 @@ var baseStructure = []string{
 	"test/features/%s",
 }
 
+func getEnvFromApiManager() (string, error) {
+	cmd := exec.Command("find", ".", "-name", "api_manager.dart")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("find command failed: %w", err)
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return "", fmt.Errorf("api_manager.dart not found")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	content := string(data)
+
+	// Regex for bool isDebug = true/false;
+	reDebug := regexp.MustCompile(`bool\s+isDebug\s*=\s*(true|false)\s*;`)
+	reStaging := regexp.MustCompile(`bool\s+isStaging\s*=\s*(true|false)\s*;`)
+
+	isDebug := false
+	isStaging := false
+
+	if m := reDebug.FindStringSubmatch(content); len(m) == 2 {
+		isDebug = m[1] == "true"
+	}
+	if m := reStaging.FindStringSubmatch(content); len(m) == 2 {
+		isStaging = m[1] == "true"
+	}
+
+	switch {
+	case isStaging && isDebug:
+		return "dev_debug", nil
+	case !isStaging && isDebug:
+		return "live_debug", nil
+	case isStaging && !isDebug:
+		return "dev", nil
+	default:
+		return "live", nil
+	}
+}
+
+// releaseAPK builds and uploads the APK, then copies the Drive link to clipboard.
+func releaseAPK(clean bool) {
+	apkPath, err := buildFlutterAPK(clean)
+	if err != nil {
+		log.Fatalf("Error building APK: %v", err)
+	}
+	fmt.Printf("APK built at: %s\n", apkPath)
+	url, err := uploadToDrive(apkPath)
+	if err != nil {
+		log.Fatalf("Error uploading to Google Drive: %v", err)
+	}
+	fmt.Printf("APK uploaded to: %s\n", url)
+	if err := copyToClipboard(url); err != nil {
+		fmt.Printf("Failed to copy URL to clipboard: %v\n", err)
+	} else {
+		fmt.Println("URL copied to clipboard!")
+	}
+}
+
+func runCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // buildFlutterAPK builds the APK and returns the output path.
-func buildFlutterAPK() (string, error) {
+func buildFlutterAPK(clean bool) (string, error) {
+	if clean {
+		if err := runCommand("flutter", "clean"); err != nil {
+			log.Printf("flutter clean failed: %v", err)
+		}
+		if err := runCommand("flutter", "pub", "get"); err != nil {
+			log.Printf("flutter pub get failed: %v", err)
+		}
+	}
+
 	branchNameCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	branchBytes, err := branchNameCmd.Output()
 	if err != nil {
@@ -44,12 +123,16 @@ func buildFlutterAPK() (string, error) {
 	}
 	branchName := strings.TrimSpace(string(branchBytes))
 	dateStr := time.Now().Format("20060102")
-	apkPath := fmt.Sprintf("builds/lkp/lkp_%s_%s.apk", dateStr, branchName)
 
-	cmd := exec.Command("flutter", "build", "apk")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	envType, err := getEnvFromApiManager()
+
+	if err != nil {
+		envType = ""
+	}
+
+	apkPath := fmt.Sprintf("builds/lkp/livekeeping_%s_%s_%s.apk", dateStr, branchName, envType)
+
+	if err := runCommand("flutter", "build", "apk"); err != nil {
 		return "", err
 	}
 
@@ -60,6 +143,7 @@ func buildFlutterAPK() (string, error) {
 	if err := os.MkdirAll(filepath.Dir(apkPath), 0755); err != nil {
 		return "", err
 	}
+
 	in, err := os.Open(apkSrc)
 	if err != nil {
 		return "", err
@@ -80,7 +164,7 @@ func getDriveService() (*drive.Service, error) {
 	ctx := context.Background()
 	// b, err := os.ReadFile("~/credentials.json")
 
-	j := [] byte(``)
+	j := []byte(``)
 
 	// if err != nil {
 	// 	return nil, err
@@ -89,7 +173,7 @@ func getDriveService() (*drive.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	tokFile := "token.json"
+    tokFile := filepath.Join(os.Getenv("HOME"), ".token.json")
 	var tok *oauth2.Token
 	if f, err := os.Open(tokFile); err == nil {
 		defer f.Close()
@@ -130,14 +214,19 @@ func uploadToDrive(filePath string) (string, error) {
 	}
 	defer f.Close()
 	fileName := filepath.Base(filePath)
-	file := &drive.File{Name: fileName}
+	file := &drive.File{
+		Name:     fileName,
+		MimeType: "application/vnd.android.package-archive", // Force APK MIME type
+	}
 	uploaded, err := driveService.Files.Create(file).Media(f).Do()
 	if err != nil {
 		return "", err
 	}
 	// Make file public
 	_, err = driveService.Permissions.Create(uploaded.Id, &drive.Permission{
-		Role: "reader", Type: "anyone",
+		Role:   "reader",
+		Type:   "domain",
+		Domain: "livekeeping.com",
 	}).Do()
 	if err != nil {
 		return "", err
@@ -597,22 +686,10 @@ func main() {
 		}
 		subCmd := os.Args[2]
 		switch subCmd {
+		case "capk":
+			releaseAPK(true)
 		case "apk":
-			apkPath, err := buildFlutterAPK()
-			if err != nil {
-				log.Fatalf("Error building APK: %v", err)
-			}
-			fmt.Printf("APK built at: %s\n", apkPath)
-			url, err := uploadToDrive(apkPath)
-			if err != nil {
-				log.Fatalf("Error uploading to Google Drive: %v", err)
-			}
-			fmt.Printf("APK uploaded to: %s\n", url)
-			if err := copyToClipboard(url); err != nil {
-				fmt.Printf("Failed to copy URL to clipboard: %v\n", err)
-			} else {
-				fmt.Println("URL copied to clipboard!")
-			}
+			releaseAPK(false)
 		default:
 			fmt.Println("❌ Unknown release subcommand. Use: upload-apk")
 		}
