@@ -1,4 +1,4 @@
-module main
+module flutter_arch
 
 go 1.24.0
 

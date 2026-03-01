@@ -34,6 +34,13 @@ var baseStructure = []string{
 	"lib/features/%s/presentation/pages",
 	"lib/features/%s/presentation/widgets",
 	"test/features/%s",
+	"test/features/%s/data/datasources",
+	"test/features/%s/data/repositories",
+	"test/features/%s/domain/entities",
+	"test/features/%s/domain/usecases",
+	"test/features/%s/presentation/pages",
+	"test/features/%s/presentation/providers",
+	"test/features/%s/presentation/widgets",
 }
 
 func getEnvFromApiManager() (string, error) {
@@ -173,7 +180,7 @@ func getDriveService() (*drive.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-    tokFile := filepath.Join(os.Getenv("HOME"), ".token.json")
+	tokFile := filepath.Join(os.Getenv("HOME"), ".token.json")
 	var tok *oauth2.Token
 	if f, err := os.Open(tokFile); err == nil {
 		defer f.Close()
@@ -287,6 +294,102 @@ func pascalCase(s string) string {
 	return strings.Join(parts, "")
 }
 
+func insertImportDirective(content, importLine string) string {
+	if strings.Contains(content, importLine) {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	insertAt := 0
+	lastImport := -1
+	firstPart := -1
+	libraryLine := -1
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "library ") {
+			libraryLine = i
+		}
+		if strings.HasPrefix(trimmed, "import ") {
+			lastImport = i
+		}
+		if firstPart == -1 && strings.HasPrefix(trimmed, "part ") {
+			firstPart = i
+		}
+	}
+
+	switch {
+	case lastImport != -1:
+		insertAt = lastImport + 1
+	case firstPart != -1:
+		insertAt = firstPart
+	case libraryLine != -1:
+		insertAt = libraryLine + 1
+	default:
+		insertAt = 0
+	}
+
+	newLines := make([]string, 0, len(lines)+1)
+	newLines = append(newLines, lines[:insertAt]...)
+	newLines = append(newLines, strings.TrimRight(importLine, "\n"))
+	newLines = append(newLines, lines[insertAt:]...)
+	return strings.Join(newLines, "\n")
+}
+
+func normalizeImportPartOrder(content string) string {
+	lines := strings.Split(content, "\n")
+	firstPart := -1
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "part ") {
+			firstPart = i
+			break
+		}
+	}
+	if firstPart == -1 {
+		return content
+	}
+
+	misplacedImports := make([]string, 0)
+	filtered := make([]string, 0, len(lines))
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if i > firstPart && strings.HasPrefix(trimmed, "import ") {
+			misplacedImports = append(misplacedImports, line)
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	if len(misplacedImports) == 0 {
+		return content
+	}
+
+	firstPartFiltered := -1
+	lastImportBeforePart := -1
+	for i, line := range filtered {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "part ") && firstPartFiltered == -1 {
+			firstPartFiltered = i
+		}
+		if firstPartFiltered == -1 && strings.HasPrefix(trimmed, "import ") {
+			lastImportBeforePart = i
+		}
+	}
+	if firstPartFiltered == -1 {
+		return content
+	}
+
+	insertAt := firstPartFiltered
+	if lastImportBeforePart != -1 {
+		insertAt = lastImportBeforePart + 1
+	}
+
+	out := make([]string, 0, len(filtered)+len(misplacedImports))
+	out = append(out, filtered[:insertAt]...)
+	out = append(out, misplacedImports...)
+	out = append(out, filtered[insertAt:]...)
+	return strings.Join(out, "\n")
+}
+
 // appendRoute ensures router.dart exists, adds an import for the page and injects a GoRoute
 func appendRoute(feature, pageName string) {
 	routerFile := filepath.Join("lib", "core", "router.dart")
@@ -302,16 +405,22 @@ func appendRoute(feature, pageName string) {
 	// route constant
 	constName := "k" + pascalCase(pageName) + "Page"
 
-	routeLine := fmt.Sprintf("    GoRoute(path: %s, builder: (context, state) => %sPage()),\n", constName, pascalCase(pageName))
+	routeLine := fmt.Sprintf("    GoRoute(path: %s, builder: (context, state) => const %sPage()),\n", constName, pascalCase(pageName))
 
 	// create base router if doesn't exist
 	if _, err := os.Stat(routerFile); os.IsNotExist(err) {
 		base := `import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'router.g.dart';
+
+// REQUIRED_FOR_FARCH: Do not remove this marker. farch inserts page imports above this line.
 // AUTO_IMPORTS
 
-final GoRouter router = GoRouter(
+@riverpod
+Raw<GoRouter> router(Ref ref) => GoRouter(
   routes: [
+    // REQUIRED_FOR_FARCH: Do not remove this marker. farch inserts new GoRoute entries above this line.
     // AUTO_ROUTES
   ],
 );
@@ -330,24 +439,23 @@ final GoRouter router = GoRouter(
 		return
 	}
 	content := string(data)
+	content = normalizeImportPartOrder(content)
 
 	// add import for page_names.dart if not present
 	if !strings.Contains(content, constImport) {
-		if strings.Contains(content, "// AUTO_IMPORTS") {
-			content = strings.Replace(content, "// AUTO_IMPORTS", constImport+"// AUTO_IMPORTS", 1)
-		} else {
-			content = constImport + content
+		if !strings.Contains(content, "// AUTO_IMPORTS") {
+			fmt.Println("⚠️  router.dart is missing // AUTO_IMPORTS marker; using fallback import insertion.")
 		}
+		content = insertImportDirective(content, constImport)
 		fmt.Println("➡️  Added import for page_names.dart")
 	}
 
 	// add import for page if not present
 	if !strings.Contains(content, importLine) {
-		if strings.Contains(content, "// AUTO_IMPORTS") {
-			content = strings.Replace(content, "// AUTO_IMPORTS", importLine+"// AUTO_IMPORTS", 1)
-		} else {
-			content = importLine + content
+		if !strings.Contains(content, "// AUTO_IMPORTS") {
+			fmt.Println("⚠️  router.dart is missing // AUTO_IMPORTS marker; using fallback import insertion.")
 		}
+		content = insertImportDirective(content, importLine)
 		fmt.Printf("➡️  Added import for %s_page.dart\n", pageName)
 	}
 
@@ -356,8 +464,10 @@ final GoRouter router = GoRouter(
 		if strings.Contains(content, "// AUTO_ROUTES") {
 			content = strings.Replace(content, "// AUTO_ROUTES", routeLine+"    // AUTO_ROUTES", 1)
 		} else if strings.Contains(content, "routes: [") {
+			fmt.Println("⚠️  router.dart is missing // AUTO_ROUTES marker; inserting route at start of routes list.")
 			content = strings.Replace(content, "routes: [", "routes: [\n"+routeLine, 1)
 		} else {
+			fmt.Println("⚠️  router.dart structure is non-standard; appending fallback GoRouter block.")
 			idx := strings.LastIndex(content, ");")
 			if idx != -1 {
 				block := "\nfinal GoRouter router = GoRouter(\n  routes: [\n" + routeLine + "  ],\n);\n"
@@ -416,7 +526,7 @@ func createEntity(feature, entityName string) {
 `, pascalCase(entityName), pascalCase(entityName))
 
 	writeFile(file, content)
-	writeTest(feature, entityName+"_entity_test.dart", "// TODO: write entity tests\n")
+	writeTest(feature, filepath.Join("domain", "entities", entityName+"_entity_test.dart"), testStub("entity "+entityName))
 }
 
 func createUsecase(feature, usecaseName string) {
@@ -432,7 +542,7 @@ func createUsecase(feature, usecaseName string) {
 `, pascalCase(usecaseName))
 
 	writeFile(file, content)
-	writeTest(feature, usecaseName+"_usecase_test.dart", "// TODO: write usecase tests\n")
+	writeTest(feature, filepath.Join("domain", "usecases", usecaseName+"_usecase_test.dart"), testStub("usecase "+usecaseName))
 }
 
 func createRepository(feature, repoName string) {
@@ -459,7 +569,7 @@ class %sRepositoryImpl implements %sRepository {
 
 	writeFile(domainFile, domainContent)
 	writeFile(dataFile, dataContent)
-	writeTest(feature, repoName+"_repository_test.dart", "// TODO: write repository tests\n")
+	writeTest(feature, filepath.Join("data", "repositories", repoName+"_repository_test.dart"), testStub("repository "+repoName))
 }
 
 func createDatasource(feature, dsName string) {
@@ -477,7 +587,7 @@ class %sDataSourceImpl implements %sDataSource {
 `, pascalCase(dsName), pascalCase(dsName), pascalCase(dsName))
 
 	writeFile(file, content)
-	writeTest(feature, dsName+"_datasource_test.dart", "// TODO: write datasource tests\n")
+	writeTest(feature, filepath.Join("data", "datasources", dsName+"_datasource_test.dart"), testStub("datasource "+dsName))
 }
 
 func createProvider(feature, providerName string) {
@@ -493,12 +603,12 @@ part '%s_provider.g.dart';
 @riverpod
 int %s(Ref ref) => 0;
 `,
-		feature,                 // %s -> class name
+		providerName,            // %s -> generated part file name
 		camelCase(providerName), // %s -> provider variable name
 	)
 
 	writeFile(file, content)
-	writeTest(feature, providerName+"_provider_test.dart", "// TODO: write provider tests\n")
+	writeTest(feature, filepath.Join("presentation", "providers", providerName+"_provider_test.dart"), testStub("provider "+providerName))
 }
 
 func createPage(feature, pageName string) {
@@ -514,7 +624,12 @@ func createPage(feature, pageName string) {
 	if _, err := os.Stat(providerPath); os.IsNotExist(err) {
 		// fallback to feature-named provider
 		selectedProvider = feature
+		providerPath = filepath.Join("lib", "features", feature, "presentation", "providers", selectedProvider+"_provider.dart")
+		if _, fallbackErr := os.Stat(providerPath); os.IsNotExist(fallbackErr) {
+			createProvider(feature, selectedProvider)
+		}
 	}
+	selectedProviderVar := camelCase(selectedProvider)
 
 	content := fmt.Sprintf(`import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -532,10 +647,10 @@ class %sPage extends ConsumerWidget {
     );
   }
 }
-`, selectedProvider, pascalCase(pageName), pascalCase(pageName), selectedProvider, pascalCase(pageName))
+`, selectedProvider, pascalCase(pageName), pascalCase(pageName), selectedProviderVar, pascalCase(pageName))
 
 	writeFile(file, content)
-	writeTest(feature, pageName+"_page_test.dart", "// TODO: write page widget tests\n")
+	writeTest(feature, filepath.Join("presentation", "pages", pageName+"_page_test.dart"), testStub("page "+pageName))
 
 	addPageConstant(pageName)
 	// Add route to router.dart
@@ -554,10 +669,20 @@ func writeFile(path, content string) {
 	}
 }
 
+func testStub(subject string) string {
+	return fmt.Sprintf(`import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('%s scaffold placeholder', () {
+    expect(true, isTrue);
+  });
+}
+`, subject)
+}
+
 func writeTest(feature, filename, content string) {
-	dir := filepath.Join("test", "features", feature)
-	_ = os.MkdirAll(dir, os.ModePerm)
-	path := filepath.Join(dir, filename)
+	path := filepath.Join("test", "features", feature, filename)
+	_ = os.MkdirAll(filepath.Dir(path), os.ModePerm)
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := os.WriteFile(path, []byte(content), 0644); err == nil {
@@ -566,6 +691,83 @@ func writeTest(feature, filename, content string) {
 			fmt.Printf("❌ Failed writing test %s: %v\n", path, err)
 		}
 	}
+}
+
+func classifyLegacyTest(name string) string {
+	switch {
+	case strings.HasSuffix(name, "_entity_test.dart"):
+		return filepath.Join("domain", "entities")
+	case strings.HasSuffix(name, "_usecase_test.dart"):
+		return filepath.Join("domain", "usecases")
+	case strings.HasSuffix(name, "_repository_test.dart"):
+		return filepath.Join("data", "repositories")
+	case strings.HasSuffix(name, "_datasource_test.dart"):
+		return filepath.Join("data", "datasources")
+	case strings.HasSuffix(name, "_provider_test.dart"):
+		return filepath.Join("presentation", "providers")
+	case strings.HasSuffix(name, "_page_test.dart"):
+		return filepath.Join("presentation", "pages")
+	case strings.HasSuffix(name, "_widget_test.dart"):
+		return filepath.Join("presentation", "widgets")
+	default:
+		return ""
+	}
+}
+
+func migrateLegacyTests() {
+	root := filepath.Join("test", "features")
+	features, err := os.ReadDir(root)
+	if err != nil {
+		fmt.Printf("❌ Failed to read %s: %v\n", root, err)
+		return
+	}
+
+	moved := 0
+	skipped := 0
+	for _, feature := range features {
+		if !feature.IsDir() {
+			continue
+		}
+
+		featureDir := filepath.Join(root, feature.Name())
+		entries, err := os.ReadDir(featureDir)
+		if err != nil {
+			fmt.Printf("❌ Failed to read %s: %v\n", featureDir, err)
+			continue
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+
+			name := entry.Name()
+			targetRelDir := classifyLegacyTest(name)
+			if targetRelDir == "" {
+				skipped++
+				continue
+			}
+
+			src := filepath.Join(featureDir, name)
+			dst := filepath.Join(featureDir, targetRelDir, name)
+			if _, err := os.Stat(dst); err == nil {
+				fmt.Printf("⚠️  Target exists, skipped: %s\n", dst)
+				skipped++
+				continue
+			}
+
+			_ = os.MkdirAll(filepath.Dir(dst), os.ModePerm)
+			if err := os.Rename(src, dst); err != nil {
+				fmt.Printf("❌ Failed to move %s -> %s: %v\n", src, dst, err)
+				skipped++
+				continue
+			}
+			fmt.Printf("✅ Moved %s -> %s\n", src, dst)
+			moved++
+		}
+	}
+
+	fmt.Printf("🎯 Migration complete. moved=%d skipped=%d\n", moved, skipped)
 }
 
 func addPageConstant(pageName string) {
@@ -603,7 +805,7 @@ func addPageConstant(pageName string) {
 }
 
 func main() {
-	if len(os.Args) < 3 {
+	if len(os.Args) < 2 {
 		fmt.Println(`Usage:
   new feature <name>
   new page <feature> <pageName>
@@ -612,6 +814,7 @@ func main() {
   new usecase <feature> <usecaseName>
   new repository <feature> <repoName>
   new datasource <feature> <dsName>
+  migrate tests
   release apk`)
 		return
 	}
@@ -678,6 +881,18 @@ func main() {
 			createDatasource(feature, ds)
 		default:
 			fmt.Println("❌ Unknown subcommand. Use: feature | page | provider | entity | usecase | repository | datasource")
+		}
+	case "migrate":
+		if len(os.Args) < 3 {
+			fmt.Println("❌ missing arguments for 'migrate'")
+			return
+		}
+		subCmd := os.Args[2]
+		switch subCmd {
+		case "tests":
+			migrateLegacyTests()
+		default:
+			fmt.Println("❌ Unknown migrate subcommand. Use: tests")
 		}
 	case "release":
 		if len(os.Args) < 3 {
